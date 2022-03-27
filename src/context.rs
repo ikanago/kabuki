@@ -1,37 +1,58 @@
-use std::cell::RefCell;
+use std::{cell::RefCell, collections::HashMap};
 
-use crate::tensor::{NdArrayView, TensorId, TensorType};
+use crate::tensor::{NdArrayView, TensorId};
 
 pub struct Context<'v> {
     storage: TensorStorage<'v>,
 }
 
-/// `TensorStorage` stores all of the tensors used in computation graph.
-pub struct TensorStorage<'v> {
-    inner: RefCell<TensorStorageInner<'v>>,
+/// Specifies the way to the tensor is stored in `TensorStorage`.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(crate) enum StorageType {
+    View,
 }
 
-struct TensorStorageInner<'v> {
-    views: Vec<NdArrayView<'v>>,
+/// Id to specify a tensor in computation graph.
+/// `NdArray` of a placeholder is registered after its `TensorId` is created, so we cannot use it to
+/// access `NdArray`.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct StorageId {
+    pub(crate) ty: StorageType,
+    // `id` alone is not unique in the graph.
+    pub(crate) id: usize,
+}
+
+impl StorageId {
+    pub(crate) fn new(ty: StorageType, id: usize) -> Self {
+        Self { ty, id }
+    }
+}
+
+/// `TensorStorage` stores all of the tensors used in computation graph.
+pub struct TensorStorage<'v> {
+    views: RefCell<Vec<NdArrayView<'v>>>,
+    lookup_table: HashMap<TensorId, StorageId>,
 }
 
 impl<'v> TensorStorage<'v> {
     pub fn new() -> Self {
         Self {
-            inner: RefCell::new(TensorStorageInner { views: Vec::new() }),
+            views: RefCell::new( Vec::new() ),
+            lookup_table: HashMap::new(),
         }
     }
 
-    pub fn push_view(&mut self, view: NdArrayView<'v>) -> TensorId {
-        let mut inner = self.inner.borrow_mut();
-        let id = TensorId::new(TensorType::View, inner.views.len());
-        inner.views.push(view);
-        id
+    pub fn push_view(&mut self, tensor_id: TensorId, view: NdArrayView<'v>) {
+        let mut inner = self.views.borrow_mut();
+        let id = StorageId::new(StorageType::View, inner.len());
+        inner.push(view);
+        self.lookup_table.insert(tensor_id, id);
     }
 
-    pub fn get(&mut self, id: TensorId) -> NdArrayView<'v> {
-        match id.ty() {
-            TensorType::View => self.inner.borrow().views[id.id()].clone(),
+    pub fn get(&mut self, id: TensorId) -> Option<NdArrayView<'v>> {
+        let storage_id = self.lookup_table.get(&id)?;
+        match storage_id.ty {
+            StorageType::View => Some(self.views.borrow()[storage_id.id].clone()),
         }
     }
 }
@@ -55,10 +76,11 @@ mod tests {
     fn push_view() {
         let mut storage = TensorStorage::new();
         let array = Array2::<f32>::ones((2, 2)).into_dyn();
-        let id = storage.push_view(array.view());
+        let id = TensorId(0);
+        storage.push_view(id, array.view());
         assert_rel_eq_arr!(
             Array2::<f32>::ones((2, 2)).into_dyn().view(),
-            storage.get(id)
+            storage.get(id).unwrap()
         );
     }
 }

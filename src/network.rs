@@ -156,4 +156,24 @@ mod tests {
         let result = network.feed(x, x_data).feed(y, y_data).forward(z);
         assert_rel_eq_arr!(arr2(&[[4.0, 5.0], [5.0, 6.0]]).into_dyn(), *result);
     }
+
+    #[test]
+    fn nested_add() {
+        let mut network = Network::new();
+        let x = network.placeholder();
+        let y = network.placeholder();
+        let z = network.add(x, y);
+        let a = network.placeholder();
+        let b = network.add(z, a);
+
+        let x_data = NdArray::new(arr2(&[[1.0, 1.0], [2.0, 2.0]]).into_dyn());
+        let y_data = NdArray::new(arr2(&[[3.0, 4.0], [3.0, 4.0]]).into_dyn());
+        let a_data = NdArray::new(arr2(&[[-2.0, 3.0], [5.0, -5.0]]).into_dyn());
+        let result = network
+            .feed(x, x_data)
+            .feed(y, y_data)
+            .feed(a, a_data)
+            .forward(b);
+        assert_rel_eq_arr!(arr2(&[[2.0, 8.0], [10.0, 1.0]]).into_dyn(), *result);
+    }
 }

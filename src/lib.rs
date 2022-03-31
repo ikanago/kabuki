@@ -1,8 +1,7 @@
-// pub mod evaluator;
-mod storage;
 pub mod network;
-pub mod tensor;
 pub mod operator;
+mod storage;
+pub mod tensor;
 
 #[macro_export]
 macro_rules! assert_rel_eq_arr {

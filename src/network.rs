@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
+use ndarray::ArrayD;
+
 use crate::{
-    operator::{Addition, ComputeContext},
+    operator::{Addition, BackwardContext, ForwardContext},
     storage::TensorStorage,
     tensor::{NdArray, TensorId, TensorInternal},
 };
@@ -32,46 +34,67 @@ impl Feeder {
 }
 
 pub struct Network {
-    tensors: HashMap<TensorId, TensorInternal>,
+    tensor_info: HashMap<TensorId, TensorInternal>,
     placeholders: Vec<TensorId>,
-    storage: TensorStorage,
-    feeder: Feeder,
+    variables: Vec<TensorId>,
+    tensors: TensorStorage,
+    grads: TensorStorage,
 }
 
 impl Network {
     pub fn new() -> Self {
         Self {
-            tensors: HashMap::new(),
+            tensor_info: HashMap::new(),
             placeholders: Vec::new(),
-            storage: TensorStorage::new(),
-            feeder: Feeder::new(),
+            variables: Vec::new(),
+            tensors: TensorStorage::new(),
+            grads: TensorStorage::new(),
         }
     }
 
     pub(crate) fn register_tensor(&mut self, tensor: TensorInternal) -> TensorId {
-        let id = TensorId(self.tensors.len());
-        self.tensors.insert(id, tensor);
+        let id = TensorId(self.tensor_info.len());
+        self.tensor_info.insert(id, tensor);
         id
     }
 
     pub(crate) fn access_tensor(&self, id: TensorId) -> &TensorInternal {
-        self.tensors
+        self.tensor_info
             .get(&id)
             .expect("Must not accessed by TensorId which has not registered.")
+    }
+
+    pub(crate) fn get_grad(&self, id: TensorId) -> NdArray {
+        self.grads
+            .get(&id)
+            .unwrap_or_else(|| panic!("Gradient of NdArray for {} is not initialized", id))
     }
 
     pub fn placeholder(&mut self) -> TensorId {
         let tensor = TensorInternal {
             operator: None,
             inputs: Vec::new(),
+            is_differentiable: false,
         };
         let id = self.register_tensor(tensor);
         self.placeholders.push(id);
         id
     }
 
+    pub fn variable(&mut self, array: NdArray) -> TensorId {
+        let tensor = TensorInternal {
+            operator: None,
+            inputs: Vec::new(),
+            is_differentiable: true,
+        };
+        let id = self.register_tensor(tensor);
+        self.variables.push(id);
+        self.tensors.insert(id, array);
+        id
+    }
+
     pub fn feed(&mut self, id: TensorId, array: NdArray) -> &mut Self {
-        self.feeder.feed(id, array);
+        self.tensors.insert(id, array);
         self
     }
 
@@ -91,17 +114,14 @@ impl Network {
                         .inputs
                         .iter()
                         .map(|input_id| {
-                            self.storage
+                            self.tensors
                                 .get(input_id)
                                 .unwrap_or_else(|| panic!("NdArray for {} is not filled", input_id))
                         })
                         .collect();
-                    let ctx = ComputeContext::new(inputs);
-                    let result = operator.compute(&ctx);
-                    self.storage.insert(id, result);
-                } else {
-                    let input = self.feeder.get(id);
-                    self.storage.insert(id, input);
+                    let ctx = ForwardContext::new(inputs);
+                    let result = operator.forward(&ctx);
+                    self.tensors.insert(id, result);
                 }
             } else {
                 // The inputs for the `id` node has not been computed.
@@ -112,9 +132,41 @@ impl Network {
             }
         }
 
-        self.storage
+        self.tensors
             .get(&tensor)
             .expect("Computation has not finished.")
+    }
+
+    pub fn backward(&self, tensor: TensorId) {
+        let mut dfs_stack = vec![tensor];
+
+        let output = self.tensors.get(&tensor).unwrap();
+        self.grads
+            .insert(tensor, NdArray::new(ArrayD::ones(output.shape())));
+
+        while let Some(id) = dfs_stack.pop() {
+            let tensor = self.access_tensor(id);
+            if !tensor.is_differentiable {
+                continue;
+            }
+
+            if let Some(ref operator) = tensor.operator {
+                let inputs = tensor
+                    .inputs
+                    .iter()
+                    .map(|input_id| {
+                        self.tensors
+                            .get(input_id)
+                            .unwrap_or_else(|| panic!("NdArray for {} is not filled", input_id))
+                    })
+                    .collect();
+                let grad = self
+                    .grads
+                    .get(&id)
+                    .unwrap_or_else(|| panic!("NdArray of gradient for {} is not initialized", id));
+                let ctx = BackwardContext::new(grad, inputs);
+            }
+        }
     }
 }
 
@@ -124,6 +176,7 @@ impl Network {
         let tensor = TensorInternal {
             operator: Some(Box::new(Addition)),
             inputs: vec![lhs, rhs],
+            is_differentiable: true,
         };
         self.register_tensor(tensor)
     }
@@ -147,33 +200,37 @@ mod tests {
     #[test]
     fn add() {
         let mut network = Network::new();
-        let x = network.placeholder();
+        let x = network.variable(NdArray::new(arr2(&[[1.0, 1.0], [2.0, 2.0]]).into_dyn()));
         let y = network.placeholder();
         let z = network.add(x, y);
 
-        let x_data = NdArray::new(arr2(&[[1.0, 1.0], [2.0, 2.0]]).into_dyn());
         let y_data = NdArray::new(arr2(&[[3.0, 4.0], [3.0, 4.0]]).into_dyn());
-        let result = network.feed(x, x_data).feed(y, y_data).forward(z);
+        let result = network.feed(y, y_data).forward(z);
         assert_rel_eq_arr!(arr2(&[[4.0, 5.0], [5.0, 6.0]]).into_dyn(), *result);
+
+        network.backward(z);
+        assert_rel_eq_arr!(
+            arr2(&[[1.0, 1.0], [1.0, 1.0]]).into_dyn(),
+            *network.get_grad(x)
+        );
     }
 
     #[test]
     fn nested_add() {
         let mut network = Network::new();
-        let x = network.placeholder();
+        let x = network.variable(NdArray::new(arr2(&[[1.0, 1.0], [2.0, 2.0]]).into_dyn()));
         let y = network.placeholder();
         let z = network.add(x, y);
-        let a = network.placeholder();
-        let b = network.add(z, a);
+        let w = network.add(x, z);
 
-        let x_data = NdArray::new(arr2(&[[1.0, 1.0], [2.0, 2.0]]).into_dyn());
-        let y_data = NdArray::new(arr2(&[[3.0, 4.0], [3.0, 4.0]]).into_dyn());
-        let a_data = NdArray::new(arr2(&[[-2.0, 3.0], [5.0, -5.0]]).into_dyn());
-        let result = network
-            .feed(x, x_data)
-            .feed(y, y_data)
-            .feed(a, a_data)
-            .forward(b);
-        assert_rel_eq_arr!(arr2(&[[2.0, 8.0], [10.0, 1.0]]).into_dyn(), *result);
+        let y_data = NdArray::new(arr2(&[[3.0, 4.0], [-3.0, 4.0]]).into_dyn());
+        let result = network.feed(y, y_data).forward(w);
+        assert_rel_eq_arr!(arr2(&[[5.0, 6.0], [1.0, 8.0]]).into_dyn(), *result);
+
+        network.backward(w);
+        assert_rel_eq_arr!(
+            arr2(&[[2.0, 2.0], [2.0, 2.0]]).into_dyn(),
+            *network.get_grad(x)
+        );
     }
 }

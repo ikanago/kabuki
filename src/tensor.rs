@@ -20,4 +20,5 @@ impl Display for TensorId {
 pub(crate) struct TensorInternal {
     pub operator: Option<Box<dyn Operator>>,
     pub inputs: Vec<TensorId>,
+    pub(crate) is_differentiable: bool,
 }
